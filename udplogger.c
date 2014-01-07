@@ -32,8 +32,6 @@ static int wbuf_size = 65536;
 static int wait_timeout = 10;
 /* Try to release unused memory? */
 static _Bool try_drop_memory_usage = 0;
-/* Name of today's log file. */
-static char filename[16] = { };
 /* Handle for today's log file. */
 static FILE *log_fp = NULL;
 /* Previous time. */
@@ -48,6 +46,9 @@ static struct tm last_tm = { .tm_year = 70, .tm_mday = 1 };
  */
 static void switch_logfile(struct tm *tm)
 {
+    /* Name of today's log file. */
+    static char filename[16] = { };
+
 	FILE *fp = log_fp;
 	snprintf(filename, sizeof(filename) - 1, "%04u-%02u-%02u.log",
 		 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
@@ -390,9 +391,9 @@ static int do_init(int argc, char *argv[])
 			fprintf(stderr, "Can't create log file.\n");
 			exit(1);
 		}
-		printf("Started at %04u-%02u-%02u %02u:%02u:%02u from %s/%s\n",
+		printf("Started at %04u-%02u-%02u %02u:%02u:%02u at %s\n",
 		       tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
-		       tm->tm_hour, tm->tm_min, tm->tm_sec, pwd, filename);
+		       tm->tm_hour, tm->tm_min, tm->tm_sec, pwd);
 	}
 	/* Successfully initialized. */
 	printf("Options: ip=%s port=%u dir=%s timeout=%u clients=%u wbuf=%u "
