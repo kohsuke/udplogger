@@ -20,6 +20,9 @@ static struct client {
 	int avail; /* Valid bytes in @buffer . */
 	char addr_str[24]; /* String representation of @addr . */
 	time_t stamp; /* Timestamp of receiving the first byte in @buffer . */
+    FILE *log_fp; /* Handle for today's log file. */
+    /* Previous time. */
+    struct tm last_tm;
 } *clients = NULL;
 
 /* Current clients. */
@@ -32,10 +35,6 @@ static int wbuf_size = 65536;
 static int wait_timeout = 10;
 /* Try to release unused memory? */
 static _Bool try_drop_memory_usage = 0;
-/* Handle for today's log file. */
-static FILE *log_fp = NULL;
-/* Previous time. */
-static struct tm last_tm = { .tm_year = 70, .tm_mday = 1 };
 
 /**
  * switch_logfile - Close yesterday's log file and open today's log file.
@@ -44,22 +43,24 @@ static struct tm last_tm = { .tm_year = 70, .tm_mday = 1 };
  *
  * Returns nothing.
  */
-static void switch_logfile(struct tm *tm)
+static void switch_logfile(struct client* client, struct tm *tm)
 {
     /* Name of today's log file. */
-    static char filename[16] = { };
+    static char filename[128] = { };
 
-	FILE *fp = log_fp;
-	snprintf(filename, sizeof(filename) - 1, "%04u-%02u-%02u.log",
-		 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
-	log_fp = fopen(filename, "a");
+    mkdir(client->addr_str,0755);
+
+	FILE *fp = client->log_fp;
+	snprintf(filename, sizeof(filename) - 1, "%s/%04u-%02u-%02u.log",
+		 client->addr_str, tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
+	client->log_fp = fopen(filename, "a");
 	if (!fp)
 		return;
 	/* If open() failed, continue using old one. */
-	if (log_fp)
+	if (client->log_fp)
 		fclose(fp);
 	else
-		log_fp = fp;
+		client->log_fp = fp;
 	try_drop_memory_usage = 1;
 }
 
@@ -81,7 +82,7 @@ static void write_logfile(struct client *ptr, const _Bool forced)
 	if (last_time != now_time) {
 		struct tm *tm = localtime(&now_time);
 		if (!tm)
-			tm = &last_tm;
+			tm = &ptr->last_tm;
 		snprintf(stamp, sizeof(stamp) - 1, "%04u-%02u-%02u "
 			 "%02u:%02u:%02u ", tm->tm_year + 1900, tm->tm_mon + 1,
 			 tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
@@ -90,11 +91,11 @@ static void write_logfile(struct client *ptr, const _Bool forced)
 		 * (last_time / 86400 != now_time / 86400) in order to allow
 		 * switching at 00:00:00 of the local time.
 		 */
-		if (tm->tm_mday != last_tm.tm_mday ||
-		    tm->tm_mon != last_tm.tm_mon ||
-		    tm->tm_year != last_tm.tm_year) {
-			last_tm = *tm;
-			switch_logfile(tm);
+		if (tm->tm_mday != ptr->last_tm.tm_mday ||
+		    tm->tm_mon != ptr->last_tm.tm_mon ||
+		    tm->tm_year != ptr->last_tm.tm_year) {
+			ptr->last_tm = *tm;
+			switch_logfile(ptr,tm);
 		}
 		last_time = now_time;
 	}
@@ -104,16 +105,16 @@ static void write_logfile(struct client *ptr, const _Bool forced)
 		const int len = cp - buffer + 1;
 		if (!cp)
 			break;
-		fprintf(log_fp, "%s%s", stamp, ptr->addr_str);
-		fwrite(buffer, 1, len, log_fp);
+		fprintf(ptr->log_fp, "%s%s ", stamp, ptr->addr_str);
+		fwrite(buffer, 1, len, ptr->log_fp);
 		avail -= len;
 		buffer += len;
 	}
 	/* Write the incomplete line if forced. */
 	if (forced && avail) {
-		fprintf(log_fp, "%s%s", stamp, ptr->addr_str);
-		fwrite(buffer, 1, avail, log_fp);
-		fprintf(log_fp, "\n");
+		fprintf(ptr->log_fp, "%s%s ", stamp, ptr->addr_str);
+		fwrite(buffer, 1, avail, ptr->log_fp);
+		fprintf(ptr->log_fp, "\n");
 		avail = 0;
 	}
 	/* Discard the written data. */
@@ -169,9 +170,9 @@ static void flush_all_and_abort(void)
 		if (clients[i].avail) {
 			write_logfile(&clients[i], 1);
 			free(clients[i].buffer);
+	        fprintf(clients[i].log_fp, "[aborted due to memory allocation failure]\n");
+	        fflush(clients[i].log_fp);
 		}
-	fprintf(log_fp, "[aborted due to memory allocation failure]\n");
-	fflush(log_fp);
 	exit(1);
 }
 
@@ -202,7 +203,7 @@ static struct client *find_client(struct sockaddr_in *addr)
 	ptr = &clients[num_clients++];
 	memset(ptr, 0, sizeof(*ptr));
 	ptr->addr = *addr;
-	snprintf(ptr->addr_str, sizeof(ptr->addr_str) - 1, "%s:%u ",
+	snprintf(ptr->addr_str, sizeof(ptr->addr_str) - 1, "%s:%u",
 		 inet_ntoa(addr->sin_addr), htons(addr->sin_port));
 	return ptr;
 }
@@ -228,7 +229,7 @@ static void do_main(const int fd)
 			if (clients[i].avail)
 				break;
 		/* Flush log file and wait for data. */
-		fflush(log_fp);
+		// fflush(log_fp);
 		poll(&pfd, 1, i < num_clients ? 1000 : -1);
 		now = time(NULL);
 		/* Check for timeout. */
@@ -384,13 +385,6 @@ static int do_init(int argc, char *argv[])
 	} else {
 		const time_t now = time(NULL);
 		struct tm *tm = localtime(&now);
-		if (!tm)
-			tm = &last_tm;
-		switch_logfile(tm);
-		if (!log_fp) {
-			fprintf(stderr, "Can't create log file.\n");
-			exit(1);
-		}
 		printf("Started at %04u-%02u-%02u %02u:%02u:%02u at %s\n",
 		       tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
 		       tm->tm_hour, tm->tm_min, tm->tm_sec, pwd);
