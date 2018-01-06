@@ -4,6 +4,8 @@
  *    Written by Tetsuo Handa <penguin-kernel@I-love.SAKURA.ne.jp>
  */
 #include <stdio.h>
+#include <signal.h>
+#include <errno.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -36,6 +38,15 @@ static int wait_timeout = 10;
 /* Try to release unused memory? */
 static _Bool try_drop_memory_usage = 0;
 
+static void flush_all_and_abort(char *reason);
+
+
+void sig_handler(int signo)
+{
+  if (signo == SIGINT)
+  	flush_all_and_abort("terminated by user");
+}
+
 /**
  * switch_logfile - Close yesterday's log file and open today's log file.
  *
@@ -54,8 +65,15 @@ static void switch_logfile(struct client* client, struct tm *tm)
 	snprintf(filename, sizeof(filename) - 1, "%s/%04u-%02u-%02u.log",
 		 client->addr_str, tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday);
 	client->log_fp = fopen(filename, "a");
-	if (!fp)
+	if (!fp) {
+		if (!client->log_fp) {
+			char errmsg[255];
+			snprintf(errmsg, sizeof(errmsg) - 1, "unnabble open file '%s', error because %s",
+		 		filename, strerror(errno));
+			flush_all_and_abort(errmsg);
+		}
 		return;
+	}
 	/* If open() failed, continue using old one. */
 	if (client->log_fp)
 		fclose(fp);
@@ -79,7 +97,7 @@ static void write_logfile(struct client *ptr, const _Bool forced)
 	char *buffer = ptr->buffer;
 	int avail = ptr->avail;
 	const time_t now_time = ptr->stamp;
-	if (last_time != now_time) {
+	if (last_time != now_time || ptr->log_fp == 0) {
 		struct tm *tm = localtime(&now_time);
 		if (!tm)
 			tm = &ptr->last_tm;
@@ -161,17 +179,21 @@ static void drop_memory_usage(void)
 /**
  * flush_all_and_abort - Clean up upon out of memory.
  *
+ * @reason:	Reason why program aborted. 
+ *
  * This function does not return.
  */
-static void flush_all_and_abort(void)
+static void flush_all_and_abort(char *reason)
 {
 	int i;
 	for (i = 0; i < num_clients; i++)
-		if (clients[i].avail) {
-			write_logfile(&clients[i], 1);
-			free(clients[i].buffer);
-	        fprintf(clients[i].log_fp, "[aborted due to memory allocation failure]\n");
-	        fflush(clients[i].log_fp);
+		if (clients[i].log_fp) {
+			if (clients[i].avail) {
+				write_logfile(&clients[i], 1);
+				free(clients[i].buffer);
+			}
+			fprintf(clients[i].log_fp, "[aborted due to %s]\n", reason);
+			fflush(clients[i].log_fp);
 		}
 	exit(1);
 }
@@ -254,7 +276,7 @@ static void do_main(const int fd)
 			/* Append data to the line. */
 			tmp = realloc(ptr->buffer, round_up(ptr->avail + len));
 			if (!tmp)
-				flush_all_and_abort();
+				flush_all_and_abort("memory allocation failure");
 			memmove(tmp + ptr->avail, buf, len);
 			ptr->avail += len;
 			ptr->buffer = tmp;
@@ -398,6 +420,8 @@ static int do_init(int argc, char *argv[])
 
 int main(int argc, char *argv[])
 {
+	if (signal(SIGINT, sig_handler) == SIG_ERR)
+  		printf("\ncan't catch SIGINT\n");
 	const int fd = do_init(argc, argv);
 	do_main(fd);
 	return 0;
